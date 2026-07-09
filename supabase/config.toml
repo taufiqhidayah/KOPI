@@ -1,0 +1,11 @@
+# Minimal Supabase CLI config. Run `supabase init` to regenerate the full file
+# with all defaults, or extend this one as needed.
+project_id = "kopdes-intelligence"
+
+[db]
+# Postgres major version used locally; Supabase cloud currently runs 15.
+major_version = 15
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
