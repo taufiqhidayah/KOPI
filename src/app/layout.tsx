@@ -1,27 +1,26 @@
 import type { Metadata } from "next";
-import { Plus_Jakarta_Sans } from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const plusJakarta = Plus_Jakarta_Sans({
-  variable: "--font-plus-jakarta",
+const geistSans = Geist({
+  variable: "--font-geist-sans",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Kopdes Intelligence — SIMKOPDES",
-  description:
-    "Modul cerdas koperasi desa untuk transparansi anggota dan pengambilan keputusan pengurus.",
+  title: "Kopdes Copilot — SIMKOPDES",
+  description: "AI Agent untuk Petugas Koperasi Desa",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="id" className={`${plusJakarta.variable} h-full`}>
-      <body className="min-h-full bg-sim-bg text-sim-ink antialiased">
+    <html lang="id">
+      <body className={`${geistSans.variable} ${geistMono.variable} h-dvh overflow-hidden antialiased`}>
         {children}
       </body>
     </html>

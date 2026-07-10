@@ -1,78 +1,53 @@
-import { NextResponse } from "next/server";
-import {
-  generateDemoMemberChatReply,
-  isDemoFallbackEnabled,
-} from "@/lib/demo-chat";
-import { parseGeminiApiError } from "@/lib/gemini-errors";
-import {
-  generateMemberChatReply,
-  isGeminiConfigured,
-} from "@/lib/gemini";
-import type { MemberChatRequest } from "@/lib/ai-types";
+import { NextRequest, NextResponse } from "next/server";
+import { logAudit } from "@/lib/audit";
+import { orchestrateChat } from "@/lib/copilot";
 
-function buildChatInput(body: MemberChatRequest) {
-  return {
-    message: body.message.trim(),
-    history: body.history ?? [],
-    memberName: body.memberName,
-    memberId: body.memberId,
-    cooperativeName: body.cooperativeName,
-    cooperativeCode: body.cooperativeCode,
-    village: body.village,
-    pendingDraft: body.pendingDraft,
-  };
-}
+export async function POST(req: NextRequest) {
+  const start = Date.now();
 
-export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as MemberChatRequest;
+    const body = await req.json();
+    const command = body.command as string;
+    const context = body.context as {
+      user_id?: string;
+      user_role?: string;
+      pending_barang_masuk?: import("@/lib/copilot").PendingBarangMasukDraft;
+      pending_tambah_produk?: import("@/lib/copilot").PendingTambahProdukDraft;
+    } | undefined;
 
-    if (!body.message?.trim()) {
-      return NextResponse.json(
-        { error: "Pesan tidak boleh kosong", code: "unknown" },
-        { status: 400 },
-      );
+    if (!command?.trim()) {
+      return NextResponse.json({ success: false, error: "Perintah tidak boleh kosong" }, { status: 400 });
     }
 
-    const input = buildChatInput(body);
+    const result = await orchestrateChat(command, {
+      pending_barang_masuk: context?.pending_barang_masuk,
+      pending_tambah_produk: context?.pending_tambah_produk,
+    });
 
-    if (!isGeminiConfigured()) {
-      return NextResponse.json(generateDemoMemberChatReply(input));
-    }
+    await logAudit({
+      userId: context?.user_id ?? "anonymous",
+      actionType: "SELECT",
+      tableName: result.intent,
+      inputText: command,
+      sqlGenerated: result.sql,
+      status: result.success ? "success" : "failed",
+      executionTimeMs: Date.now() - start,
+      errorMessage: result.error,
+    });
 
-    try {
-      const result = await generateMemberChatReply(input);
-      return NextResponse.json(result);
-    } catch (error) {
-      const parsed = parseGeminiApiError(error);
-
-      if (isDemoFallbackEnabled()) {
-        const demo = generateDemoMemberChatReply(input);
-        return NextResponse.json({
-          ...demo,
-          reply: `${demo.reply}\n\n(Catatan: respons otomatis sementara karena kuota API Gemini habis.)`,
-        });
-      }
-
-      const status = parsed.code === "rate_limited" ? 429 : 503;
-      return NextResponse.json(
-        {
-          error: parsed.userMessage,
-          code: parsed.code,
-          retryAfterSeconds: parsed.retryAfterSeconds,
-        },
-        { status },
-      );
-    }
+    return NextResponse.json(result);
   } catch (error) {
-    const parsed = parseGeminiApiError(error);
-    return NextResponse.json(
-      {
-        error: parsed.userMessage,
-        code: parsed.code,
-        retryAfterSeconds: parsed.retryAfterSeconds,
-      },
-      { status: 500 },
-    );
+    const message = error instanceof Error ? error.message : "Unknown error";
+
+    await logAudit({
+      userId: "anonymous",
+      actionType: "SELECT",
+      tableName: "chat",
+      status: "failed",
+      executionTimeMs: Date.now() - start,
+      errorMessage: message,
+    });
+
+    return NextResponse.json({ success: false, error: message, in_scope: false }, { status: 500 });
   }
 }
