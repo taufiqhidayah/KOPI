@@ -14,15 +14,73 @@ const UNIT_PATTERN = /(\d+(?:[.,]\d+)?)\s*(kilo|kg|kilogram|karung|galon|liter|b
 
 export function parseHargaBeli(text: string): number | undefined {
   const lower = text.toLowerCase();
-  const labeled = lower.match(/(?:harga|beli|@|rp\.?)\s*([\d.,]+)/i);
+  const labeled = lower.match(/(?:harga\s*beli|beli|@|rp\.?)\s*([\d.,]+)/i);
   if (labeled) return parseRupiah(labeled[1]);
 
+  const hargaOnly = lower.match(/\bharga\s*([\d.,]+)/i);
+  if (hargaOnly && !/harga\s*jual/i.test(lower)) return parseRupiah(hargaOnly[1]);
+
   const bare = lower.match(/\b(\d{4,})\b/);
-  if (bare && !UNIT_PATTERN.test(lower.replace(bare[0], ""))) {
+  if (bare && !UNIT_PATTERN.test(lower.replace(bare[0], "")) && !/harga\s*jual/i.test(lower)) {
     return parseRupiah(bare[1]);
   }
 
   return undefined;
+}
+
+export function parseHargaJual(text: string): number | undefined {
+  const match = text.toLowerCase().match(/(?:harga\s*jual|jual)\s*(?:rp\.?)?\s*([\d.,]+)/i);
+  if (match) return parseRupiah(match[1]);
+  return undefined;
+}
+
+export function parseKeterangan(text: string): string | undefined {
+  const match = text.match(/(?:keterangan|ket|catatan|dari\s+supplier)\s*[:\-]?\s*(.+)/i);
+  if (match) return match[1].trim().slice(0, 1000);
+  return undefined;
+}
+
+export function parseNamaTampilan(text: string): string | undefined {
+  const match = text.match(/(?:nama\s*tampilan|tampilan)\s*[:\-]?\s*(.+)/i);
+  if (match) return match[1].trim().slice(0, 200);
+  return undefined;
+}
+
+export type BarangMasukExtras = {
+  harga_jual?: number;
+  keterangan?: string;
+  nama_tampilan?: string;
+};
+
+export function parseBarangMasukExtras(text: string): BarangMasukExtras {
+  return {
+    harga_jual: parseHargaJual(text),
+    keterangan: parseKeterangan(text),
+    nama_tampilan: parseNamaTampilan(text),
+  };
+}
+
+export function isSkipOptionalField(text: string): boolean {
+  return /^(lewati|skip|tanpa|tidak ada|nanti|belum|\-)$/i.test(text.trim())
+    || /lewati\s+(harga\s*jual|keterangan|dokumentasi|lampiran)/i.test(text)
+    || /tanpa\s+(harga\s*jual|keterangan|dokumentasi|lampiran)/i.test(text)
+    || /^tidak\s+ada\s+(keterangan|dokumentasi|lampiran)/i.test(text);
+}
+
+export function isSkipHargaJual(text: string): boolean {
+  return /tanpa harga jual|lewati harga jual|skip harga jual/i.test(text.toLowerCase());
+}
+
+export function isSkipKeterangan(text: string): boolean {
+  return /tanpa keterangan|lewati keterangan|skip keterangan|tidak ada keterangan/i.test(text.toLowerCase());
+}
+
+export function isSkipDokumentasi(text: string): boolean {
+  return /tanpa dokumentasi|tanpa lampiran|lewati dokumentasi|lewati lampiran|skip dokumentasi/i.test(text.toLowerCase());
+}
+
+export function isDokumentasiUploaded(text: string): boolean {
+  return /dokumentasi\s*(sudah|terupload|terunggah)|lampiran\s*(sudah|terupload|terunggah)/i.test(text.toLowerCase());
 }
 
 function parseRupiah(raw: string): number {

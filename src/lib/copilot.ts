@@ -1,8 +1,23 @@
 import { getKoperasiRef, query, queryOne } from "./db";
 import { classifyIntent, getHelpReply, getOutOfScopeReply, getUploadNotaReply } from "./intent";
 import { generateSql, generateSummary, generateDraftSurat } from "./llm";
-import { generateBarangMasukReply, type PendingBarangMasukDraft } from "./copilot-reply";
-import { parseBarangMasukText, parseHargaBeli, isBarangMasukConfirm, parseProductOnly, isTambahProdukConfirm, isTambahProdukTanpaStok } from "./parse-barang-masuk";
+import { generateBarangMasukReply, type PendingBarangMasukDraft, resolveBarangMasukPhase, advanceBarangMasukPhase } from "./copilot-reply";
+import {
+  parseBarangMasukText,
+  parseHargaBeli,
+  isBarangMasukConfirm,
+  parseProductOnly,
+  isTambahProdukConfirm,
+  isTambahProdukTanpaStok,
+  parseBarangMasukExtras,
+  parseHargaJual,
+  parseKeterangan,
+  parseNamaTampilan,
+  isSkipHargaJual,
+  isSkipKeterangan,
+  isSkipDokumentasi,
+  isDokumentasiUploaded,
+} from "./parse-barang-masuk";
 import { findBestProduct } from "./product-match";
 import {
   buildTambahProdukSuggestions,
@@ -33,7 +48,9 @@ export type ChatAction =
   | { type: "confirm_pengajuan"; payload: { kode_bank: string; nama_bank: string; preview: Record<string, unknown> } }
   | { type: "confirm_barang_masuk"; payload: PendingBarangMasukDraft }
   | { type: "confirm_tambah_produk"; payload: PendingTambahProdukDraft }
-  | { type: "upload_nota" };
+  | { type: "upload_nota" }
+  | { type: "show_barang_masuk_form" }
+  | { type: "upload_dokumentasi" };
 
 export type CopilotChatResponse = {
   success: boolean;
@@ -54,7 +71,224 @@ export type CopilotChatResponse = {
 };
 
 function isSkipHarga(text: string): boolean {
-  return /tanpa harga|lewati harga|skip harga|simpan tanpa/i.test(text.toLowerCase());
+  return /tanpa harga|lewati harga|skip harga|simpan tanpa/i.test(text.toLowerCase()) && !/harga jual/i.test(text.toLowerCase());
+}
+
+function initDraftPhase(draft: PendingBarangMasukDraft): PendingBarangMasukDraft {
+  const d = { ...draft };
+
+  if (d.phase === "confirm") return d;
+
+  if (d.phase === "dokumentasi") {
+    if (d.dokumentasi_nama || d.skip_dokumentasi) d.phase = "confirm";
+    return d;
+  }
+
+  if (d.phase === "keterangan") {
+    if (!d.keterangan && !d.skip_keterangan) return d;
+    d.phase = "dokumentasi";
+    return initDraftPhase(d);
+  }
+
+  if (d.phase === "harga_jual") {
+    if ((!d.harga_jual || d.harga_jual <= 0) && !d.skip_harga_jual) return d;
+    d.phase = "keterangan";
+    return initDraftPhase(d);
+  }
+
+  if (d.phase === "harga_beli") {
+    if (d.harga_beli <= 0) return d;
+    d.phase = "harga_jual";
+    return initDraftPhase(d);
+  }
+
+  if (d.harga_beli <= 0) {
+    d.phase = "harga_beli";
+    return d;
+  }
+
+  d.phase = "harga_jual";
+  return initDraftPhase(d);
+}
+
+function applyExtrasToDraft(draft: PendingBarangMasukDraft, command: string): PendingBarangMasukDraft {
+  const extras = parseBarangMasukExtras(command);
+  const next = { ...draft };
+  if (extras.nama_tampilan) next.nama_tampilan = extras.nama_tampilan;
+  if (extras.harga_jual && extras.harga_jual > 0) next.harga_jual = extras.harga_jual;
+  if (extras.keterangan) next.keterangan = extras.keterangan;
+  const namaTampilan = parseNamaTampilan(command);
+  if (namaTampilan) next.nama_tampilan = namaTampilan;
+  const ket = parseKeterangan(command);
+  if (ket) next.keterangan = ket;
+  return next;
+}
+
+async function replyFromDraft(
+  draft: PendingBarangMasukDraft,
+  command: string,
+  situation: string,
+  lastHarga?: number,
+  withConfirm = false,
+): Promise<CopilotChatResponse> {
+  const phase = resolveBarangMasukPhase(draft);
+  const reply = await generateBarangMasukReply({
+    intent: "barang_masuk",
+    userMessage: command,
+    situation,
+    draft,
+    lastHargaBeli: lastHarga,
+  }, phase);
+
+  return {
+    success: true,
+    in_scope: true,
+    intent: "barang_masuk",
+    summary: reply.summary,
+    data: [{
+      produk: draft.nama_tampilan ?? draft.nama_produk,
+      qty: draft.jumlah_masuk,
+      harga_beli: draft.harga_beli,
+      harga_jual: draft.harga_jual,
+      keterangan: draft.keterangan,
+      dokumentasi: draft.dokumentasi_nama,
+    }],
+    pending_barang_masuk: draft,
+    action: withConfirm || phase === "need_confirm"
+      ? { type: "confirm_barang_masuk", payload: draft }
+      : phase === "need_dokumentasi"
+        ? { type: "upload_dokumentasi" }
+        : undefined,
+    suggested_prompts: reply.suggested_prompts,
+    execution_time_ms: 0,
+  };
+}
+
+async function handlePendingBarangMasukDraft(
+  command: string,
+  context: ChatContext,
+): Promise<CopilotChatResponse> {
+  const koperasiRef = getKoperasiRef();
+  let draft = applyExtrasToDraft({ ...context.pending_barang_masuk! }, command);
+  draft = initDraftPhase(draft);
+  const lastHarga = await getLastHargaBeli(draft.produk_sample_id, koperasiRef);
+
+  if (isHargaLookup(command)) {
+    return replyFromDraft(draft, command, "lookup harga", lastHarga);
+  }
+
+  if (/^batal$/i.test(command.trim())) {
+    const reply = await generateBarangMasukReply({
+      intent: "barang_masuk",
+      userMessage: command,
+      situation: "User membatalkan input barang masuk.",
+      draft,
+    }, "done");
+    return {
+      success: true,
+      in_scope: true,
+      intent: "barang_masuk",
+      summary: "Oke, barang masuk dibatalkan.",
+      suggested_prompts: reply.suggested_prompts,
+      execution_time_ms: 0,
+    };
+  }
+
+  if (isDokumentasiUploaded(command) && draft.dokumentasi_nama) {
+    draft = advanceBarangMasukPhase({ ...draft, phase: "dokumentasi" });
+    draft.phase = "confirm";
+    return replyFromDraft(draft, command, "dokumentasi terupload", lastHarga, true);
+  }
+
+  const phase = draft.phase ?? "harga_beli";
+
+  if (phase === "harga_beli") {
+    const hargaInput = parseHargaBeli(command);
+    const skipHarga = isSkipHarga(command);
+
+    if (hargaInput !== undefined && hargaInput > 0) {
+      draft.harga_beli = hargaInput;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "harga beli diisi", lastHarga);
+    }
+
+    if (skipHarga) {
+      draft.harga_beli = 0;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "tanpa harga beli", lastHarga);
+    }
+
+    return replyFromDraft(draft, command, "menunggu harga beli", lastHarga);
+  }
+
+  if (phase === "harga_jual") {
+    const hargaJual = parseHargaJual(command);
+    if (hargaJual !== undefined && hargaJual > 0) {
+      draft.harga_jual = hargaJual;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "harga jual diisi", lastHarga);
+    }
+    if (isSkipHargaJual(command)) {
+      draft.skip_harga_jual = true;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "lewati harga jual", lastHarga);
+    }
+    return replyFromDraft(draft, command, "menunggu harga jual", lastHarga);
+  }
+
+  if (phase === "keterangan") {
+    const ket = parseKeterangan(command);
+    if (ket) {
+      draft.keterangan = ket;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "keterangan diisi", lastHarga);
+    }
+    if (isSkipKeterangan(command)) {
+      draft.skip_keterangan = true;
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "lewati keterangan", lastHarga);
+    }
+    if (command.trim().length >= 3 && !isBarangMasukConfirm(command)) {
+      draft.keterangan = command.trim().slice(0, 1000);
+      draft = advanceBarangMasukPhase(draft);
+      draft = initDraftPhase(draft);
+      return replyFromDraft(draft, command, "keterangan bebas", lastHarga);
+    }
+    return replyFromDraft(draft, command, "menunggu keterangan", lastHarga);
+  }
+
+  if (phase === "dokumentasi") {
+    if (isSkipDokumentasi(command)) {
+      draft.skip_dokumentasi = true;
+      draft.phase = "confirm";
+      return replyFromDraft(draft, command, "lewati dokumentasi", lastHarga, true);
+    }
+    if (draft.dokumentasi_nama) {
+      draft.phase = "confirm";
+      return replyFromDraft(draft, command, "dokumentasi ada", lastHarga, true);
+    }
+    return replyFromDraft(draft, command, "menunggu dokumentasi", lastHarga);
+  }
+
+  if (phase === "confirm" || isBarangMasukConfirm(command)) {
+    draft.phase = "confirm";
+    return replyFromDraft(draft, command, "konfirmasi simpan", lastHarga, true);
+  }
+
+  const hargaInput = parseHargaBeli(command);
+  if (hargaInput !== undefined && hargaInput > 0) {
+    draft.harga_beli = hargaInput;
+    draft = initDraftPhase(draft);
+    return replyFromDraft(draft, command, "update harga beli", lastHarga);
+  }
+
+  return replyFromDraft(draft, command, "menunggu konfirmasi", lastHarga, draft.phase === "confirm");
 }
 
 function isHargaLookup(text: string): boolean {
@@ -314,138 +548,7 @@ async function handleBarangMasuk(
   );
 
   if (context?.pending_barang_masuk) {
-    const draft = { ...context.pending_barang_masuk };
-    const lastHarga = await getLastHargaBeli(draft.produk_sample_id, koperasiRef);
-
-    if (isHargaLookup(command)) {
-      const reply = await generateBarangMasukReply({
-        intent: "barang_masuk",
-        userMessage: command,
-        situation: lastHarga
-          ? `Harga beli terakhir ${draft.nama_produk} Rp ${lastHarga.toLocaleString("id-ID")} per ${draft.unit ?? "unit"}. Tanya apakah pakai harga ini.`
-          : `Belum ada riwayat harga beli ${draft.nama_produk}. Minta user isi harga atau simpan tanpa harga.`,
-        facts: { produk: draft.nama_produk, harga_terakhir: lastHarga },
-        draft,
-        lastHargaBeli: lastHarga,
-      }, "need_harga");
-
-      return {
-        success: true,
-        in_scope: true,
-        intent: "barang_masuk",
-        summary: reply.summary,
-        data: [{ produk: draft.nama_produk, harga_beli_terakhir: lastHarga ?? "belum ada" }],
-        pending_barang_masuk: draft,
-        suggested_prompts: reply.suggested_prompts,
-        execution_time_ms: 0,
-      };
-    }
-
-    const hargaInput = parseHargaBeli(command);
-    const confirmed = isBarangMasukConfirm(command);
-    const cancelled = /^batal$/i.test(command.trim());
-    const skipHarga = isSkipHarga(command);
-
-    if (cancelled) {
-      const reply = await generateBarangMasukReply({
-        intent: "barang_masuk",
-        userMessage: command,
-        situation: "User membatalkan input barang masuk.",
-        draft,
-      }, "done");
-      return {
-        success: true,
-        in_scope: true,
-        intent: "barang_masuk",
-        summary: reply.summary,
-        suggested_prompts: reply.suggested_prompts,
-        execution_time_ms: 0,
-      };
-    }
-
-    if (skipHarga) {
-      draft.harga_beli = 0;
-      const reply = await generateBarangMasukReply({
-        intent: "barang_masuk",
-        userMessage: command,
-        situation: `User mau simpan ${draft.nama_produk} ${draft.jumlah_masuk} ${draft.unit ?? ""} tanpa harga beli. Minta konfirmasi.`,
-        draft,
-      }, "need_confirm");
-      return {
-        success: true,
-        in_scope: true,
-        intent: "barang_masuk",
-        summary: reply.summary,
-        data: [{ produk: draft.nama_produk, qty: draft.jumlah_masuk, harga_beli: 0 }],
-        pending_barang_masuk: draft,
-        action: { type: "confirm_barang_masuk", payload: draft },
-        suggested_prompts: reply.suggested_prompts,
-        execution_time_ms: 0,
-      };
-    }
-
-    if (hargaInput !== undefined && hargaInput > 0 && !confirmed) {
-      draft.harga_beli = hargaInput;
-      const reply = await generateBarangMasukReply({
-        intent: "barang_masuk",
-        userMessage: command,
-        situation: `Harga beli ${draft.nama_produk} Rp ${hargaInput.toLocaleString("id-ID")}. Minta konfirmasi simpan.`,
-        facts: { produk: draft.nama_produk, qty: draft.jumlah_masuk, harga_beli: hargaInput },
-        draft,
-        lastHargaBeli: lastHarga,
-      }, "need_confirm");
-      return {
-        success: true,
-        in_scope: true,
-        intent: "barang_masuk",
-        summary: reply.summary,
-        data: [{ produk: draft.nama_produk, qty: draft.jumlah_masuk, harga_beli: hargaInput }],
-        pending_barang_masuk: draft,
-        action: { type: "confirm_barang_masuk", payload: draft },
-        suggested_prompts: reply.suggested_prompts,
-        execution_time_ms: 0,
-      };
-    }
-
-    if (confirmed) {
-      const reply = await generateBarangMasukReply({
-        intent: "barang_masuk",
-        userMessage: command,
-        situation: `User konfirmasi simpan ${draft.nama_produk} ${draft.jumlah_masuk} ${draft.unit ?? ""}.`,
-        facts: draft,
-        draft,
-      }, "need_confirm");
-      return {
-        success: true,
-        in_scope: true,
-        intent: "barang_masuk",
-        summary: reply.summary,
-        data: [{ produk: draft.nama_produk, qty: draft.jumlah_masuk, harga_beli: draft.harga_beli }],
-        pending_barang_masuk: draft,
-        action: { type: "confirm_barang_masuk", payload: draft },
-        suggested_prompts: reply.suggested_prompts,
-        execution_time_ms: 0,
-      };
-    }
-
-    const reply = await generateBarangMasukReply({
-      intent: "barang_masuk",
-      userMessage: command,
-      situation: `Masih menunggu harga beli atau konfirmasi untuk ${draft.nama_produk} ${draft.jumlah_masuk} ${draft.unit ?? ""}.`,
-      draft,
-      lastHargaBeli: lastHarga,
-    }, "need_harga");
-
-    return {
-      success: true,
-      in_scope: true,
-      intent: "barang_masuk",
-      summary: reply.summary,
-      data: [{ produk: draft.nama_produk, qty: draft.jumlah_masuk, stok_sekarang: draft.stok_sekarang }],
-      pending_barang_masuk: draft,
-      suggested_prompts: reply.suggested_prompts,
-      execution_time_ms: 0,
-    };
+    return handlePendingBarangMasukDraft(command, context);
   }
 
   const parsed = parseBarangMasukText(command);
@@ -543,35 +646,49 @@ async function handleBarangMasuk(
 
   const stokSekarang = Number(inventaris?.stok ?? 0);
   const resolvedUnit = unit ?? best.unit ?? "";
-  const draft: PendingBarangMasukDraft = {
+  const extras = parseBarangMasukExtras(command);
+  let draft: PendingBarangMasukDraft = {
     produk_sample_id: best.produk_sample_id,
     nama_produk: best.nama_produk ?? productQuery,
+    nama_tampilan: extras.nama_tampilan,
     jumlah_masuk: qty,
     harga_beli: hargaBeli ?? 0,
+    harga_jual: extras.harga_jual,
+    keterangan: extras.keterangan,
     unit: resolvedUnit,
     stok_sekarang: stokSekarang,
   };
+  draft = initDraftPhase(draft);
 
   const lastHarga = await getLastHargaBeli(best.produk_sample_id, koperasiRef);
+  const uiPhase = resolveBarangMasukPhase(draft);
   const reply = await generateBarangMasukReply({
     intent: "barang_masuk",
     userMessage: command,
-    situation: hargaBeli
-      ? `${draft.nama_produk} ${qty} ${resolvedUnit} siap disimpan. Stok sekarang ${stokSekarang}.`
-      : `Catat ${draft.nama_produk} ${qty} ${resolvedUnit}. Stok sekarang ${stokSekarang}. Tanya harga beli.`,
+    situation: `Catat ${draft.nama_produk} ${qty} ${resolvedUnit}. Stok sekarang ${stokSekarang}.`,
     facts: { stok_sekarang: stokSekarang, harga_beli: draft.harga_beli, produk: draft.nama_produk },
     draft,
     lastHargaBeli: lastHarga,
-  }, hargaBeli ? "need_confirm" : "need_harga");
+  }, uiPhase);
 
   return {
     success: true,
     in_scope: true,
     intent: "barang_masuk",
     summary: reply.summary,
-    data: [{ produk: draft.nama_produk, qty: draft.jumlah_masuk, stok_sekarang: stokSekarang, harga_beli: draft.harga_beli || "belum diisi" }],
+    data: [{
+      produk: draft.nama_tampilan ?? draft.nama_produk,
+      qty: draft.jumlah_masuk,
+      stok_sekarang: stokSekarang,
+      harga_beli: draft.harga_beli || "belum diisi",
+      harga_jual: draft.harga_jual,
+    }],
     pending_barang_masuk: draft,
-    action: hargaBeli ? { type: "confirm_barang_masuk", payload: draft } : undefined,
+    action: uiPhase === "need_confirm"
+      ? { type: "confirm_barang_masuk", payload: draft }
+      : uiPhase === "need_dokumentasi"
+        ? { type: "upload_dokumentasi" }
+        : undefined,
     suggested_prompts: reply.suggested_prompts,
     execution_time_ms: 0,
   };
@@ -630,6 +747,18 @@ export async function orchestrateChat(command: string, context?: ChatContext): P
     const result = await handleBarangMasuk(command, context);
     result.execution_time_ms = Date.now() - start;
     return result;
+  }
+
+  if (/tambah barang masuk|form barang masuk|buka form barang masuk/i.test(command.toLowerCase().trim())) {
+    return {
+      success: true,
+      in_scope: true,
+      intent: "barang_masuk",
+      summary:
+        "Siap catat barang masuk lewat chat. Sebut produk + jumlah, misalnya \"beras 10 kg harga beli 12000 harga jual 15000 keterangan: dari supplier Makmur\". Upload foto nota/dokumentasi lewat 📷.",
+      suggested_prompts: ["beras 10 kg premium", "Upload foto nota", "Stok barangku"],
+      execution_time_ms: Date.now() - start,
+    };
   }
 
   const intent = await classifyIntent(command, {

@@ -14,8 +14,8 @@ export const COPILOT_CAPABILITIES = [
   {
     id: "barang_masuk",
     label: "Catat Barang Masuk",
-    description: "Input barang masuk dari teks: produk + jumlah, atau nama produk saja",
-    examples: ["galon 20", "beras 10 kg premium", "minyak goreng"],
+    description: "Full chat: produk, jumlah, harga beli/jual, keterangan, dokumentasi + OCR foto nota",
+    examples: ["beras 10 kg harga beli 12000 harga jual 15000", "Upload foto nota", "Tambah barang masuk"],
   },
   {
     id: "tambah_produk",
@@ -40,7 +40,8 @@ export const COPILOT_CAPABILITIES = [
 export const FEATURE_CHIPS = [
   { label: "Laporan penjualan", prompt: "Laporan penjualan minggu ini" },
   { label: "Stok barang", prompt: "Stok barangku" },
-  { label: "Barang masuk", prompt: "beras 10 kg premium" },
+  { label: "Form barang masuk", prompt: "Tambah barang masuk" },
+  { label: "Barang masuk cepat", prompt: "beras 10 kg premium" },
   { label: "Tambah produk", prompt: "minyak tanah 20 liter" },
   { label: "Upload nota", prompt: "cara upload foto nota" },
   { label: "Pengajuan bank", prompt: "Buka rekening bank BRI" },

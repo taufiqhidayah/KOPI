@@ -1,4 +1,5 @@
-import { getKoperasiRef, query, withTransaction } from "./db";
+import { getKoperasiRef, query, queryOne, withTransaction } from "./db";
+import { extractThumbnailUrl } from "./barang-masuk-constants";
 import { generateRef } from "./security";
 import type { PoolClient } from "pg";
 
@@ -16,6 +17,32 @@ export type CreateProdukResult = {
   inventaris_ref: string;
   barang_masuk_ref?: string;
   stok: number;
+};
+
+export type ProdukListItem = {
+  produk_sample_id: string;
+  sku: string;
+  nama_produk: string;
+  unit: string;
+  kategori: string;
+  jenis_barang: string;
+  potensi_desa: string;
+  penyedia: string;
+  thumbnail_url: string | null;
+  stok: number;
+};
+
+export type ListProdukResult = {
+  items: ProdukListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+export type ListProdukParams = {
+  search?: string;
+  page?: number;
+  pageSize?: number;
 };
 
 async function nextProdukSampleId(client: PoolClient, koperasiRef: string): Promise<string> {
@@ -88,6 +115,98 @@ export async function createProduk(input: CreateProdukInput): Promise<CreateProd
       stok,
     };
   });
+}
+
+export async function listProduk(params: ListProdukParams = {}): Promise<ListProdukResult> {
+  const koperasiRef = getKoperasiRef();
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(100, Math.max(1, params.pageSize ?? 10));
+  const offset = (page - 1) * pageSize;
+  const search = params.search?.trim().toLowerCase();
+
+  const filters = ["p.koperasi_ref = $1"];
+  const queryParams: unknown[] = [koperasiRef];
+
+  if (search) {
+    queryParams.push(`%${search}%`);
+    const idx = queryParams.length;
+    filters.push(
+      `(LOWER(p.nama_produk) LIKE $${idx} OR LOWER(COALESCE(p.kode_barcode, '')) LIKE $${idx} OR LOWER(p.produk_sample_id) LIKE $${idx})`,
+    );
+  }
+
+  const where = `WHERE ${filters.join(" AND ")}`;
+
+  const countRow = await queryOne<{ total: string }>(
+    `SELECT COUNT(*)::text AS total FROM produk_koperasi p ${where}`,
+    queryParams,
+  );
+  const total = Number(countRow?.total ?? 0);
+
+  const limitIdx = queryParams.length + 1;
+  const offsetIdx = queryParams.length + 2;
+  queryParams.push(pageSize, offset);
+
+  const rows = await query<{
+    produk_sample_id: string;
+    sku: string;
+    nama_produk: string | null;
+    unit: string | null;
+    stok: string | null;
+    penyedia: string | null;
+    thumb_keterangan: string | null;
+  }>(
+    `SELECT
+      p.produk_sample_id,
+      COALESCE(NULLIF(TRIM(p.kode_barcode), ''), p.produk_sample_id) AS sku,
+      p.nama_produk,
+      p.unit,
+      COALESCE(i.stok, 0) AS stok,
+      bm.keterangan AS penyedia,
+      thumb.keterangan AS thumb_keterangan
+    FROM produk_koperasi p
+    LEFT JOIN inventaris_produk i
+      ON i.produk_sample_id = p.produk_sample_id AND i.koperasi_ref = p.koperasi_ref
+    LEFT JOIN LATERAL (
+      SELECT keterangan FROM barang_masuk_produk
+      WHERE produk_sample_id = p.produk_sample_id
+        AND koperasi_ref = p.koperasi_ref
+        AND keterangan IS NOT NULL
+        AND keterangan <> 'Input via chat'
+      ORDER BY tanggal_masuk DESC NULLS LAST, dibuat_pada DESC NULLS LAST
+      LIMIT 1
+    ) bm ON true
+    LEFT JOIN LATERAL (
+      SELECT keterangan FROM barang_masuk_produk
+      WHERE produk_sample_id = p.produk_sample_id
+        AND koperasi_ref = p.koperasi_ref
+        AND keterangan LIKE '%Lampiran: /uploads/barang-masuk/%'
+      ORDER BY tanggal_masuk DESC NULLS LAST, dibuat_pada DESC NULLS LAST
+      LIMIT 1
+    ) thumb ON true
+    ${where}
+    ORDER BY p.dibuat_pada DESC NULLS LAST, p.nama_produk ASC
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    queryParams,
+  );
+
+  return {
+    items: rows.map((row) => ({
+      produk_sample_id: row.produk_sample_id,
+      sku: row.sku,
+      nama_produk: row.nama_produk ?? "-",
+      unit: row.unit ?? "-",
+      kategori: "-",
+      jenis_barang: "-",
+      potensi_desa: "-",
+      penyedia: row.penyedia ?? "-",
+      thumbnail_url: extractThumbnailUrl(row.thumb_keterangan),
+      stok: Number(row.stok ?? 0),
+    })),
+    total,
+    page,
+    pageSize,
+  };
 }
 
 export async function listProdukNames(koperasiRef?: string): Promise<string[]> {

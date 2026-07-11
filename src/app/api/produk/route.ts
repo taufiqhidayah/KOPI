@@ -1,6 +1,51 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logAudit } from "@/lib/audit";
-import { createProduk } from "@/lib/produk";
+import { createProduk, listProduk } from "@/lib/produk";
+
+export async function GET(req: NextRequest) {
+  const start = Date.now();
+
+  try {
+    const { searchParams } = new URL(req.url);
+    const search = searchParams.get("search") ?? undefined;
+    const page = searchParams.get("page") ? Number(searchParams.get("page")) : 1;
+    const pageSize = searchParams.get("pageSize") ? Number(searchParams.get("pageSize")) : 10;
+
+    const result = await listProduk({ search, page, pageSize });
+
+    await logAudit({
+      userId: "bendahara",
+      actionType: "SELECT",
+      tableName: "produk_koperasi",
+      status: "success",
+      executionTimeMs: Date.now() - start,
+    });
+
+    return NextResponse.json({ success: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const isTimeout = /timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND/i.test(message);
+
+    await logAudit({
+      userId: "bendahara",
+      actionType: "SELECT",
+      tableName: "produk_koperasi",
+      status: "failed",
+      executionTimeMs: Date.now() - start,
+      errorMessage: message,
+    });
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: isTimeout
+          ? "Database hackathon tidak terjangkau. Cek koneksi internet/VPN atau hubungi penyedia DB."
+          : message,
+      },
+      { status: isTimeout ? 503 : 500 },
+    );
+  }
+}
 
 export async function POST(req: NextRequest) {
   const start = Date.now();

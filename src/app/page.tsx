@@ -1,5 +1,5 @@
-import { CopilotChat } from "@/components/copilot/Sidebar";
+import { SimkopdesApp } from "@/simkopdes";
 
 export default function HomePage() {
-  return <CopilotChat />;
+  return <SimkopdesApp />;
 }

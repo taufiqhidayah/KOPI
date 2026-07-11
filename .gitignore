@@ -34,4 +34,6 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+# uploads (keep folder)
+/public/uploads/barang-masuk/*
+!/public/uploads/barang-masuk/.gitkeep

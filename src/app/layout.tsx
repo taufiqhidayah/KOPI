@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Kopdes Copilot — SIMKOPDES",
-  description: "AI Agent untuk Petugas Koperasi Desa",
+  title: "Simkopdes — Kopdes Copilot",
+  description: "Sistem Informasi Koperasi Desa dengan AI Copilot",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

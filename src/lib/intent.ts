@@ -76,6 +76,16 @@ function localClassifyIntent(command: string): IntentResult | null {
     };
   }
 
+  if (/tambah barang masuk|form barang masuk|buka form barang masuk/i.test(lower)) {
+    return {
+      in_scope: true,
+      intent: "barang_masuk",
+      confidence: 0.95,
+      reasoning: "form tambah barang masuk",
+      suggested_prompts: ["Upload foto nota", "Stok barangku"],
+    };
+  }
+
   if (/tambah produk|produk baru|belum ada di master/i.test(lower)) {
     return {
       in_scope: true,
@@ -201,7 +211,7 @@ export function getOutOfScopeReply() {
 
 export function getUploadNotaReply() {
   return {
-    summary: "Tap ikon 📷 di bawah untuk foto nota, atau ketik manual misalnya \"aqua 5 galon\".",
-    suggested_prompts: ["Aqua 5 galon", "Stok barangku"],
+    summary: "Upload satu atau banyak foto nota lewat 📷 (bisa pilih beberapa sekaligus). Nota masuk antrian — review lalu tap Simpan semua.",
+    suggested_prompts: ["Simpan semua nota", "Upload nota lagi"],
   };
 }
