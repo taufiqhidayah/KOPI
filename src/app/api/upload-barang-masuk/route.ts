@@ -3,7 +3,7 @@ import { logAudit } from "@/lib/audit";
 import { DOKUMENTASI_MAX_BYTES, DOKUMENTASI_MIME } from "@/lib/barang-masuk-constants";
 import { getKoperasiRef, query } from "@/lib/db";
 import { generateRef } from "@/lib/security";
-import { saveBarangMasukDokumentasi } from "@/lib/uploads";
+import { saveBarangMasukDokumentasi, canWriteUploadsToDisk } from "@/lib/uploads";
 import { extractNoteData, matchProducts } from "@/lib/vision";
 
 function validateFile(file: File): string | null {
@@ -43,7 +43,9 @@ export async function POST(req: NextRequest) {
     const mimeType = uploadFile.type || "image/jpeg";
     const dokumentasiNama = uploadFile.name;
     const ref = generateRef("BM");
-    const dokumentasiUrl = await saveBarangMasukDokumentasi(buffer, { ref, mimeType });
+    const dokumentasiUrl = canWriteUploadsToDisk()
+      ? await saveBarangMasukDokumentasi(buffer, { ref, mimeType })
+      : undefined;
 
     let ocr: {
       harga_beli?: number;
@@ -106,7 +108,7 @@ export async function POST(req: NextRequest) {
       dokumentasi_url: dokumentasiUrl,
       ocr,
       message: ocr?.is_nota
-        ? `📷 Nota terbaca${ocr.matched_item ? `: ${ocr.matched_item.nama} ${ocr.matched_item.qty} @ Rp${ocr.matched_item.harga.toLocaleString("id-ID")}` : ""}. Lampiran disimpan.`
+        ? `📷 Nota terbaca${ocr.matched_item ? `: ${ocr.matched_item.nama} ${ocr.matched_item.qty} @ Rp${ocr.matched_item.harga.toLocaleString("id-ID")}` : ""}.${dokumentasiUrl ? " Lampiran disimpan." : ""}`
         : `📎 Lampiran ${dokumentasiNama} diterima.`,
     });
   } catch (error) {

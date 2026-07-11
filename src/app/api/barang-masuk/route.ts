@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { logAudit } from "@/lib/audit";
 import { getKoperasiRef, query, withTransaction } from "@/lib/db";
 import { generateRef } from "@/lib/security";
-import { saveBarangMasukDokumentasi } from "@/lib/uploads";
+import { saveBarangMasukDokumentasi, canWriteUploadsToDisk } from "@/lib/uploads";
 import { buildKeteranganWithDokumentasi, DOKUMENTASI_MAX_BYTES, DOKUMENTASI_MIME, listBarangMasuk } from "@/lib/barang-masuk";
 import { normalizeUnit, sanitizeProdukName } from "@/lib/tambah-produk-guide";
 import {
@@ -75,6 +75,16 @@ async function parseRequest(req: NextRequest): Promise<{
       dokumentasiFile = dokumentasi;
     }
 
+    let unmatchedItems: NotaUnmatchedDraft[] | undefined;
+    const unmatchedRaw = form.get("unmatched_items");
+    if (typeof unmatchedRaw === "string" && unmatchedRaw.trim()) {
+      try {
+        unmatchedItems = JSON.parse(unmatchedRaw) as NotaUnmatchedDraft[];
+      } catch {
+        return { payload: { items: [] }, error: "Format unmatched_items tidak valid" };
+      }
+    }
+
     return {
       payload: {
         koperasi_ref: (form.get("koperasi_ref") as string) || undefined,
@@ -82,6 +92,8 @@ async function parseRequest(req: NextRequest): Promise<{
         keterangan: (form.get("keterangan") as string) ?? "",
         confirmed_by: (form.get("confirmed_by") as string) ?? "bendahara",
         items,
+        unmatched_items: unmatchedItems,
+        dokumentasi_nama: (form.get("dokumentasi_nama") as string) || undefined,
       },
       dokumentasiFile,
     };
@@ -278,13 +290,15 @@ export async function POST(req: NextRequest) {
     let dokumentasiUrl = payload.dokumentasi_url;
     let dokumentasiNama = dokumentasiFile?.name ?? payload.dokumentasi_nama;
 
-    if (dokumentasiFile && !dokumentasiUrl) {
+    if (dokumentasiFile && !dokumentasiUrl && canWriteUploadsToDisk()) {
       const ref = generateRef("BM");
       const buffer = Buffer.from(await dokumentasiFile.arrayBuffer());
       dokumentasiUrl = await saveBarangMasukDokumentasi(buffer, {
         ref,
         mimeType: dokumentasiFile.type || "image/jpeg",
       });
+      dokumentasiNama = dokumentasiFile.name;
+    } else if (dokumentasiFile) {
       dokumentasiNama = dokumentasiFile.name;
     }
 

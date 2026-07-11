@@ -535,7 +535,7 @@ export function CopilotChat({
         supplier: supplier ?? "",
         tanggal: data.extracted_data.tanggal,
         total: Number(data.extracted_data.total),
-        dokumentasi_url: data.image_url as string,
+        dokumentasiFile: file,
         items: items.map((item) => ({
           produk_sample_id: item.produk_sample_id,
           jumlah_masuk: item.qty,
@@ -671,18 +671,30 @@ export function CopilotChat({
     const summaries: string[] = [];
     const createdProducts: string[] = [];
     for (const nota of queue) {
-      const res = await fetch("/api/barang-masuk", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tanggal_masuk: nota.tanggal,
-          keterangan: nota.supplier,
-          items: nota.items,
-          unmatched_items: nota.unmatched,
-          dokumentasi_url: nota.dokumentasi_url,
-          confirmed_by: "bendahara",
-        }),
-      });
+      let res: Response;
+      if (nota.dokumentasiFile) {
+        const form = new FormData();
+        form.append("tanggal_masuk", nota.tanggal);
+        form.append("keterangan", nota.supplier || `Nota ${nota.fileName}`);
+        form.append("items", JSON.stringify(nota.items));
+        form.append("unmatched_items", JSON.stringify(nota.unmatched));
+        form.append("dokumentasi", nota.dokumentasiFile);
+        form.append("confirmed_by", "bendahara");
+        res = await fetch("/api/barang-masuk", { method: "POST", body: form });
+      } else {
+        res = await fetch("/api/barang-masuk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tanggal_masuk: nota.tanggal,
+            keterangan: nota.supplier,
+            items: nota.items,
+            unmatched_items: nota.unmatched,
+            dokumentasi_url: nota.dokumentasi_url,
+            confirmed_by: "bendahara",
+          }),
+        });
+      }
       const data = await res.json();
       if (!data.success) throw new Error(data.error ?? `Gagal simpan ${nota.fileName}`);
       summaries.push(`${nota.supplier}: ${nota.items.length + nota.unmatched.length} item`);

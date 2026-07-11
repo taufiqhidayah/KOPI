@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logAudit } from "@/lib/audit";
 import { getKoperasiRef, query } from "@/lib/db";
-import { generateRef } from "@/lib/security";
-import { saveBarangMasukDokumentasi } from "@/lib/uploads";
 import { extractNoteData, matchProducts } from "@/lib/vision";
 
 export async function POST(req: NextRequest) {
@@ -16,12 +14,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: "File tidak ditemukan" }, { status: 400 });
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const mimeType = file.type || "image/jpeg";
+    const uploadFile = file as File;
+    const buffer = Buffer.from(await uploadFile.arrayBuffer());
+    const mimeType = uploadFile.type || "image/jpeg";
     const imageBase64 = buffer.toString("base64");
-
-    const notaRef = generateRef("BM");
-    const imageUrl = await saveBarangMasukDokumentasi(buffer, { ref: notaRef, mimeType });
 
     const extracted = await extractNoteData(imageBase64, mimeType);
     const koperasiRef = getKoperasiRef();
@@ -44,7 +40,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      image_url: imageUrl,
+      dokumentasi_nama: uploadFile.name || "nota.jpg",
       extracted_data: {
         tanggal: extracted.tanggal,
         supplier: extracted.supplier,
