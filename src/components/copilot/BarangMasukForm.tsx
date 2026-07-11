@@ -28,6 +28,7 @@ type BarangMasukFormProps = {
   onSubmit: (values: BarangMasukFormValues) => void;
   onCancel: () => void;
   loading?: boolean;
+  initialValues?: Partial<BarangMasukFormValues>;
 };
 
 function parseRupiah(value: string): number {
@@ -40,19 +41,25 @@ function formatRupiah(value: number): string {
   return value.toLocaleString("id-ID");
 }
 
-export function BarangMasukForm({ onSubmit, onCancel, loading = false }: BarangMasukFormProps) {
+export function BarangMasukForm({ onSubmit, onCancel, loading = false, initialValues }: BarangMasukFormProps) {
   const [produk, setProduk] = useState<ProdukOption[]>([]);
   const [produkLoading, setProdukLoading] = useState(true);
   const [produkError, setProdukError] = useState<string | null>(null);
 
-  const [produkId, setProdukId] = useState("");
-  const [namaTampilan, setNamaTampilan] = useState("");
-  const [jumlahMasuk, setJumlahMasuk] = useState("");
-  const [unit, setUnit] = useState("");
-  const [hargaBeli, setHargaBeli] = useState("");
-  const [hargaJual, setHargaJual] = useState("");
-  const [keterangan, setKeterangan] = useState("");
-  const [dokumentasi, setDokumentasi] = useState<File | null>(null);
+  const [produkId, setProdukId] = useState(initialValues?.produk_sample_id ?? "");
+  const [namaTampilan, setNamaTampilan] = useState(initialValues?.nama_tampilan ?? "");
+  const [jumlahMasuk, setJumlahMasuk] = useState(
+    initialValues?.jumlah_masuk ? String(initialValues.jumlah_masuk) : "",
+  );
+  const [unit, setUnit] = useState(initialValues?.unit ?? "");
+  const [hargaBeli, setHargaBeli] = useState(
+    initialValues?.harga_beli ? formatRupiah(initialValues.harga_beli) : "",
+  );
+  const [hargaJual, setHargaJual] = useState(
+    initialValues?.harga_jual ? formatRupiah(initialValues.harga_jual) : "",
+  );
+  const [keterangan, setKeterangan] = useState(initialValues?.keterangan ?? "");
+  const [dokumentasi, setDokumentasi] = useState<File | null>(initialValues?.dokumentasi ?? null);
   const [dokumentasiError, setDokumentasiError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -88,6 +95,20 @@ export function BarangMasukForm({ onSubmit, onCancel, loading = false }: BarangM
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!initialValues || produkLoading) return;
+    if (initialValues.produk_sample_id) {
+      setProdukId(initialValues.produk_sample_id);
+    }
+    if (initialValues.nama_tampilan) setNamaTampilan(initialValues.nama_tampilan);
+    if (initialValues.jumlah_masuk) setJumlahMasuk(String(initialValues.jumlah_masuk));
+    if (initialValues.unit) setUnit(initialValues.unit);
+    if (initialValues.harga_beli) setHargaBeli(formatRupiah(initialValues.harga_beli));
+    if (initialValues.harga_jual) setHargaJual(formatRupiah(initialValues.harga_jual));
+    if (initialValues.keterangan) setKeterangan(initialValues.keterangan);
+    if (initialValues.dokumentasi) setDokumentasi(initialValues.dokumentasi);
+  }, [initialValues, produkLoading]);
 
   const handleProdukChange = (id: string) => {
     setProdukId(id);
@@ -157,7 +178,9 @@ export function BarangMasukForm({ onSubmit, onCancel, loading = false }: BarangM
       className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
     >
       <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-slate-800">Tambah Barang Masuk</h3>
+        <h3 className="text-sm font-semibold text-slate-800">
+          {initialValues ? "Edit Barang Masuk" : "Tambah Barang Masuk"}
+        </h3>
         <button
           type="button"
           onClick={onCancel}

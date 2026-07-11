@@ -17,18 +17,29 @@ import {
   isSkipKeterangan,
   isSkipDokumentasi,
   isDokumentasiUploaded,
+  parseTambahProdukQty,
 } from "./parse-barang-masuk";
 import { findBestProduct } from "./product-match";
 import {
   buildTambahProdukSuggestions,
   buildTambahProdukSummary,
+  extractTambahProdukName,
   normalizeProdukName,
   normalizeUnit,
+  sanitizeProdukName,
   type TambahProdukPrefill,
 } from "./tambah-produk-guide";
+import {
+  formatProdukMetaSummary,
+  isProdukMetaComplete,
+  mergeProdukMeta,
+  parseProdukMetaFromText,
+  resolveProdukMeta,
+} from "./produk-meta";
 import { getSchemaDescription } from "./schema";
 import { enforceRowLimit, validateChatSql } from "./security";
 import { COPILOT_CAPABILITIES } from "./copilot-scope";
+import { buildReportSummary, buildReportView, type ReportView } from "./report-format";
 
 export type { PendingBarangMasukDraft } from "./copilot-reply";
 
@@ -37,11 +48,23 @@ export type PendingTambahProdukDraft = {
   unit?: string;
   jumlah_masuk?: number;
   harga_beli?: number;
+  kategori?: string;
+  jenis_barang?: string;
+  potensi_desa?: string;
+  penyedia?: string;
+};
+
+export type PendingPengajuanDraft = {
+  kode_bank: string;
+  nama_bank: string;
+  preview: Record<string, unknown>;
+  draft_surat: string;
 };
 
 export type ChatContext = {
   pending_barang_masuk?: PendingBarangMasukDraft;
   pending_tambah_produk?: PendingTambahProdukDraft;
+  pending_pengajuan?: PendingPengajuanDraft;
 };
 
 export type ChatAction =
@@ -59,6 +82,7 @@ export type CopilotChatResponse = {
   summary: string;
   explanation?: string;
   data?: Record<string, unknown>[];
+  report?: ReportView;
   sql?: string;
   capabilities?: typeof COPILOT_CAPABILITIES;
   suggested_prompts?: string[];
@@ -67,6 +91,7 @@ export type CopilotChatResponse = {
   error?: string;
   pending_barang_masuk?: PendingBarangMasukDraft;
   pending_tambah_produk?: PendingTambahProdukDraft;
+  pending_pengajuan?: PendingPengajuanDraft;
   execution_time_ms: number;
 };
 
@@ -200,6 +225,11 @@ async function handlePendingBarangMasukDraft(
     return replyFromDraft(draft, command, "dokumentasi terupload", lastHarga, true);
   }
 
+  if (isBarangMasukConfirm(command) && draft.harga_beli > 0) {
+    draft.phase = "confirm";
+    return replyFromDraft(draft, command, "konfirmasi simpan cepat", lastHarga, true);
+  }
+
   const phase = draft.phase ?? "harga_beli";
 
   if (phase === "harga_beli") {
@@ -254,7 +284,7 @@ async function handlePendingBarangMasukDraft(
       draft = initDraftPhase(draft);
       return replyFromDraft(draft, command, "lewati keterangan", lastHarga);
     }
-    if (command.trim().length >= 3 && !isBarangMasukConfirm(command)) {
+    if (command.trim().length >= 3 && !isBarangMasukConfirm(command) && !looksLikeBarangInput(command)) {
       draft.keterangan = command.trim().slice(0, 1000);
       draft = advanceBarangMasukPhase(draft);
       draft = initDraftPhase(draft);
@@ -293,6 +323,15 @@ async function handlePendingBarangMasukDraft(
 
 function isHargaLookup(text: string): boolean {
   return /harga.*terakhir|terakhir.*harga|riwayat.*harga|cek.*harga beli/i.test(text.toLowerCase());
+}
+
+function looksLikeBarangInput(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return (
+    /tambah\s+produk/i.test(lower)
+    || /\d+\s*(kg|kilo|kilogram|liter|galon|buah|pcs|karung|pack|dus)\b/i.test(lower)
+    || /^[a-z\s]{3,30}\s+\d+/i.test(lower)
+  );
 }
 
 async function getLastHargaBeli(
@@ -368,13 +407,65 @@ async function handlePengajuanRekening(namaBank: string, kodeBank: string): Prom
     success: true,
     in_scope: true,
     intent: "pengajuan_rekening",
-    summary: `Siap bantu pengajuan rekening ${namaBank}.${missingText} Periksa draft surat lalu konfirmasi.`,
+    summary: `Siap bantu pengajuan rekening ${namaBank}.${missingText} Periksa draft surat lalu konfirmasi simpan.`,
     draft_surat: draftSurat,
-    action: {
-      type: "confirm_pengajuan",
-      payload: { kode_bank: kodeBank, nama_bank: namaBank, preview: autoFilled },
+    pending_pengajuan: {
+      kode_bank: kodeBank,
+      nama_bank: namaBank,
+      preview: autoFilled,
+      draft_surat: draftSurat,
     },
-    suggested_prompts: ["Buatkan laporan penjualan minggu ini", "Stok barangku"],
+    suggested_prompts: ["Ya, simpan pengajuan", "Batal"],
+    execution_time_ms: 0,
+  };
+}
+
+async function handlePendingPengajuan(
+  command: string,
+  context: ChatContext,
+): Promise<CopilotChatResponse> {
+  const draft = context.pending_pengajuan!;
+
+  if (/^batal$/i.test(command.trim())) {
+    return {
+      success: true,
+      in_scope: true,
+      intent: "pengajuan_rekening",
+      summary: "Oke, pengajuan rekening dibatalkan.",
+      suggested_prompts: ["Stok barangku", "Laporan penjualan minggu ini"],
+      execution_time_ms: 0,
+    };
+  }
+
+  if (isBarangMasukConfirm(command) || /simpan pengajuan/i.test(command)) {
+    return {
+      success: true,
+      in_scope: true,
+      intent: "pengajuan_rekening",
+      summary: "Periksa data pengajuan di bawah. Jika sudah benar, konfirmasi simpan ke database.",
+      draft_surat: draft.draft_surat,
+      pending_pengajuan: draft,
+      action: {
+        type: "confirm_pengajuan",
+        payload: {
+          kode_bank: draft.kode_bank,
+          nama_bank: draft.nama_bank,
+          preview: draft.preview,
+        },
+      },
+      suggested_prompts: ["Batal"],
+      execution_time_ms: 0,
+    };
+  }
+
+  return {
+    success: true,
+    in_scope: true,
+    intent: "pengajuan_rekening",
+    summary: `Masih menunggu konfirmasi pengajuan rekening ${draft.nama_bank}.`,
+    draft_surat: draft.draft_surat,
+    pending_pengajuan: draft,
+    suggested_prompts: ["Ya, simpan pengajuan", "Batal"],
     execution_time_ms: 0,
   };
 }
@@ -382,24 +473,47 @@ async function handlePengajuanRekening(namaBank: string, kodeBank: string): Prom
 async function handleProfilInfo(command: string): Promise<CopilotChatResponse> {
   const koperasiRef = getKoperasiRef();
 
-  const profil = await queryOne(
+  const profil = await queryOne<{
+    nama_koperasi: string | null;
+    nik_koperasi: string | null;
+    alamat_lengkap: string | null;
+    status_registrasi: string | null;
+  }>(
     `SELECT nama_koperasi, nik_koperasi, alamat_lengkap, status_registrasi FROM profil_koperasi WHERE koperasi_ref = $1`,
     [koperasiRef],
   );
 
-  const pengurus = await query(
+  const pengurus = await query<{ nama: string | null; jabatan: string | null; no_hp: string | null }>(
     `SELECT nama, jabatan, no_hp FROM pengurus_koperasi WHERE koperasi_ref = $1 LIMIT 10`,
     [koperasiRef],
   );
 
-  const dokumen = await query(
+  const dokumen = await query<{ jenis_dokumen_ref: string | null; nomor: string | null }>(
     `SELECT jenis_dokumen_ref, nomor FROM dokumen_koperasi WHERE koperasi_ref = $1 LIMIT 20`,
     [koperasiRef],
   );
 
-  const summary = await generateSummary(command, [
-    { profil, pengurus_count: pengurus.length, dokumen_count: dokumen.length },
-  ]);
+  const lower = command.toLowerCase();
+  let summary: string;
+
+  if (/ketua|siapa.*ketua/i.test(lower)) {
+    const ketua = pengurus.find((p) => /ketua/i.test(p.jabatan ?? ""));
+    summary = ketua
+      ? `Ketua ${profil?.nama_koperasi ?? "koperasi"}: ${ketua.nama} (${ketua.jabatan}${ketua.no_hp ? `, ${ketua.no_hp}` : ""}).`
+      : `Data ketua belum tercatat untuk ${profil?.nama_koperasi ?? "koperasi ini"}.`;
+  } else if (/pengurus/i.test(lower)) {
+    summary = pengurus.length
+      ? `Pengurus ${profil?.nama_koperasi ?? "koperasi"}: ${pengurus.map((p) => `${p.nama} (${p.jabatan})`).join(", ")}.`
+      : "Belum ada data pengurus.";
+  } else if (/dokumen/i.test(lower)) {
+    summary = dokumen.length
+      ? `Dokumen tercatat: ${dokumen.map((d) => d.jenis_dokumen_ref).filter(Boolean).join(", ")}.`
+      : "Belum ada dokumen tercatat (SKAHU, NIB, NPWP belum diupload).";
+  } else {
+    summary = profil
+      ? `${profil.nama_koperasi} — NIK ${profil.nik_koperasi ?? "-"}, ${profil.alamat_lengkap ?? "alamat belum diisi"}. Status: ${profil.status_registrasi ?? "-"}.`
+      : "Profil koperasi belum ditemukan.";
+  }
 
   const followUp = { suggested_prompts: ["Laporan penjualan minggu ini", "Stok barangku"] };
 
@@ -423,42 +537,70 @@ function offerTambahProduk(
   prefill: TambahProdukPrefill,
   existingProducts: string[] = [],
 ): CopilotChatResponse {
-  const namaProduk = normalizeProdukName(prefill.nama_produk);
+  const namaProduk = sanitizeProdukName(prefill.nama_produk);
   const unit = normalizeUnit(prefill.satuan);
+  const meta = resolveProdukMeta(namaProduk, unit, {
+    kategori: prefill.kategori,
+    jenis_barang: prefill.jenis_barang,
+    potensi_desa: prefill.potensi_desa,
+    penyedia: prefill.penyedia,
+  });
+
   const draft: PendingTambahProdukDraft = {
     nama_produk: namaProduk,
     unit,
     jumlah_masuk: prefill.jumlah,
     harga_beli: prefill.harga_beli,
+    ...meta,
   };
+
+  const metaSummary = formatProdukMetaSummary(meta);
+  const needsMeta = !isProdukMetaComplete(meta);
 
   return {
     success: true,
     in_scope: true,
     intent: "tambah_produk",
-    summary: buildTambahProdukSummary({ ...prefill, nama_produk: namaProduk, satuan: unit }),
-    explanation: prefill.jumlah
-      ? "Produk baru bisa ditambahkan lewat chat, lalu stok langsung dicatat."
-      : "Produk baru bisa ditambahkan lewat chat. Kategori & penyedia bisa dilengkapi nanti di form SIMKOPDES.",
+    summary: needsMeta
+      ? `${buildTambahProdukSummary({ ...prefill, nama_produk: namaProduk, satuan: unit })} Saya isi sementara: ${metaSummary}. Bisa ubah lewat saran di bawah.`
+      : `${buildTambahProdukSummary({ ...prefill, nama_produk: namaProduk, satuan: unit })} ${metaSummary}.`,
+    explanation: "Data kategori, jenis barang, potensi desa, dan penyedia ikut disimpan ke daftar produk.",
     data: [{
       nama_produk: namaProduk,
       satuan: unit,
+      kategori: meta.kategori,
+      jenis_barang: meta.jenis_barang,
+      potensi_desa: meta.potensi_desa,
+      penyedia: meta.penyedia ?? "-",
       ...(prefill.jumlah ? { jumlah_masuk: prefill.jumlah } : {}),
     }],
     pending_tambah_produk: draft,
-    action: { type: "confirm_tambah_produk", payload: draft },
-    suggested_prompts: buildTambahProdukSuggestions({ ...prefill, nama_produk: namaProduk, satuan: unit }, existingProducts),
+    suggested_prompts: buildTambahProdukSuggestions({ ...prefill, nama_produk: namaProduk, satuan: unit, ...meta }, existingProducts),
     execution_time_ms: 0,
   };
 }
 
+function applyMetaToTambahDraft(
+  draft: PendingTambahProdukDraft,
+  command: string,
+): PendingTambahProdukDraft {
+  const parsed = parseProdukMetaFromText(command);
+  const merged = mergeProdukMeta(
+    resolveProdukMeta(draft.nama_produk, draft.unit, draft),
+    parsed,
+  );
+  return { ...draft, ...merged };
+}
+
 async function handleTambahProduk(command: string): Promise<CopilotChatResponse> {
-  const parsed = parseBarangMasukText(command);
+  const parsed = parseTambahProdukQty(command);
+  const meta = parseProdukMetaFromText(command);
   const prefill: TambahProdukPrefill = {
-    nama_produk: parsed?.productQuery ?? command.replace(/tambah produk|produk baru/gi, "").trim(),
+    nama_produk: extractTambahProdukName(command),
     satuan: parsed?.unit,
     jumlah: parsed?.qty,
-    harga_beli: parsed?.hargaBeli,
+    harga_beli: parsed?.hargaBeli ?? parseHargaBeli(command),
+    ...meta,
   };
 
   return offerTambahProduk(prefill);
@@ -468,7 +610,7 @@ async function handlePendingTambahProduk(
   command: string,
   context: ChatContext,
 ): Promise<CopilotChatResponse> {
-  const draft = { ...context.pending_tambah_produk! };
+  const draft = applyMetaToTambahDraft({ ...context.pending_tambah_produk! }, command);
 
   if (/^batal$/i.test(command.trim())) {
     return {
@@ -487,9 +629,14 @@ async function handlePendingTambahProduk(
       ...offerTambahProduk({
         nama_produk: draft.nama_produk,
         satuan: draft.unit,
+        kategori: draft.kategori,
+        jenis_barang: draft.jenis_barang,
+        potensi_desa: draft.potensi_desa,
+        penyedia: draft.penyedia,
       }),
+      summary: `Oke, tambah ${draft.nama_produk} tanpa stok awal. Periksa data lalu konfirmasi.`,
       pending_tambah_produk: draft,
-      action: { type: "confirm_tambah_produk", payload: draft },
+      suggested_prompts: ["Ya, tambah produk", "Batal"],
     };
   }
 
@@ -502,23 +649,54 @@ async function handlePendingTambahProduk(
         satuan: draft.unit,
         jumlah: draft.jumlah_masuk,
         harga_beli: hargaInput,
+        kategori: draft.kategori,
+        jenis_barang: draft.jenis_barang,
+        potensi_desa: draft.potensi_desa,
+        penyedia: draft.penyedia,
       }),
-      summary: `Harga beli ${draft.nama_produk} Rp ${hargaInput.toLocaleString("id-ID")}. Konfirmasi tambah produk${draft.jumlah_masuk ? ` dan catat ${draft.jumlah_masuk} ${draft.unit ?? ""} masuk` : ""}?`,
+      summary: `Harga beli ${draft.nama_produk} Rp ${hargaInput.toLocaleString("id-ID")}. Periksa data lalu konfirmasi tambah produk${draft.jumlah_masuk ? ` dan catat ${draft.jumlah_masuk} ${draft.unit ?? ""} masuk` : ""}.`,
       pending_tambah_produk: draft,
-      action: { type: "confirm_tambah_produk", payload: draft },
+      suggested_prompts: ["Ya, tambah produk", "Batal"],
     };
   }
 
   if (isTambahProdukConfirm(command)) {
+    const meta = resolveProdukMeta(draft.nama_produk, draft.unit, draft);
+    const finalDraft = { ...draft, ...meta };
+    return {
+      ...offerTambahProduk({
+        nama_produk: finalDraft.nama_produk,
+        satuan: finalDraft.unit,
+        jumlah: finalDraft.jumlah_masuk,
+        harga_beli: finalDraft.harga_beli,
+        kategori: finalDraft.kategori,
+        jenis_barang: finalDraft.jenis_barang,
+        potensi_desa: finalDraft.potensi_desa,
+        penyedia: finalDraft.penyedia,
+      }),
+      summary: `Periksa data ${finalDraft.nama_produk} di bawah. Jika sudah benar, konfirmasi simpan ke database.`,
+      pending_tambah_produk: finalDraft,
+      action: { type: "confirm_tambah_produk", payload: finalDraft },
+      suggested_prompts: ["Batal"],
+    };
+  }
+
+  const metaOnly = parseProdukMetaFromText(command);
+  if (Object.keys(metaOnly).length > 0) {
     return {
       ...offerTambahProduk({
         nama_produk: draft.nama_produk,
         satuan: draft.unit,
         jumlah: draft.jumlah_masuk,
         harga_beli: draft.harga_beli,
+        kategori: draft.kategori,
+        jenis_barang: draft.jenis_barang,
+        potensi_desa: draft.potensi_desa,
+        penyedia: draft.penyedia,
       }),
       pending_tambah_produk: draft,
-      action: { type: "confirm_tambah_produk", payload: draft },
+      summary: `Oke, data produk diperbarui: ${formatProdukMetaSummary(draft)}.`,
+      suggested_prompts: ["Ya, tambah produk", "Batal"],
     };
   }
 
@@ -563,7 +741,7 @@ async function handleBarangMasuk(
     const existingNames = products.map((p) => p.nama_produk ?? "").filter(Boolean);
 
     if (!best) {
-      return offerTambahProduk({ nama_produk: productQuery, satuan: unit }, existingNames);
+      return offerTambahProduk({ nama_produk: productQuery, satuan: unit, ...parseProdukMetaFromText(command) }, existingNames);
     }
 
     const inventaris = await queryOne<{ stok: string | null }>(
@@ -614,7 +792,13 @@ async function handleBarangMasuk(
 
     if (options.length === 0 || /barang lain|produk baru|tambah produk/i.test(command)) {
       return offerTambahProduk(
-        { nama_produk: productQuery, satuan: unit, jumlah: qty, harga_beli: hargaBeli },
+        {
+          nama_produk: productQuery,
+          satuan: unit,
+          jumlah: qty,
+          harga_beli: hargaBeli,
+          ...parseProdukMetaFromText(command),
+        },
         existingNames,
       );
     }
@@ -716,7 +900,10 @@ async function handleQuery(command: string): Promise<CopilotChatResponse> {
 
   const safeSql = enforceRowLimit(sql);
   const data = await query<Record<string, unknown>>(safeSql);
-  const summary = await generateSummary(command, data);
+  const report = buildReportView(command, data);
+  const summary = report
+    ? buildReportSummary(command, data, report)
+    : await generateSummary(command, data);
 
   const followUp = data.length > 0
     ? { suggested_prompts: ["Stok barang menipis", "Laporan penjualan minggu ini"] }
@@ -729,6 +916,7 @@ async function handleQuery(command: string): Promise<CopilotChatResponse> {
     summary,
     sql: safeSql,
     data,
+    report: report ?? undefined,
     suggested_prompts: followUp.suggested_prompts,
     execution_time_ms: 0,
   };
@@ -736,6 +924,12 @@ async function handleQuery(command: string): Promise<CopilotChatResponse> {
 
 export async function orchestrateChat(command: string, context?: ChatContext): Promise<CopilotChatResponse> {
   const start = Date.now();
+
+  if (context?.pending_pengajuan) {
+    const result = await handlePendingPengajuan(command, context);
+    result.execution_time_ms = Date.now() - start;
+    return result;
+  }
 
   if (context?.pending_tambah_produk) {
     const result = await handlePendingTambahProduk(command, context);

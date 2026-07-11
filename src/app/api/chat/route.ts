@@ -5,7 +5,7 @@ import { orchestrateChat } from "@/lib/copilot";
 export async function POST(req: NextRequest) {
   const start = Date.now();
 
-  try {
+  try { 
     const body = await req.json();
     const command = body.command as string;
     const context = body.context as {
@@ -13,6 +13,7 @@ export async function POST(req: NextRequest) {
       user_role?: string;
       pending_barang_masuk?: import("@/lib/copilot").PendingBarangMasukDraft;
       pending_tambah_produk?: import("@/lib/copilot").PendingTambahProdukDraft;
+      pending_pengajuan?: import("@/lib/copilot").PendingPengajuanDraft;
     } | undefined;
 
     if (!command?.trim()) {
@@ -22,6 +23,7 @@ export async function POST(req: NextRequest) {
     const result = await orchestrateChat(command, {
       pending_barang_masuk: context?.pending_barang_masuk,
       pending_tambah_produk: context?.pending_tambah_produk,
+      pending_pengajuan: context?.pending_pengajuan,
     });
 
     await logAudit({

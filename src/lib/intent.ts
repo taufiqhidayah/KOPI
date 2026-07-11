@@ -42,8 +42,24 @@ function extractBankName(command: string): string {
   return match[1].toUpperCase();
 }
 
+function isOutOfScopeCommand(command: string): boolean {
+  const lower = command.toLowerCase().trim();
+  return /presiden|politik|cuaca|resep|coding|hiburan|film|lagu|sepak\s*bola/i.test(lower)
+    || /^siapa\s+(?!ketua|pengurus|bendahara|sekretaris|koperasi)/i.test(lower);
+}
+
 function localClassifyIntent(command: string): IntentResult | null {
   const lower = command.toLowerCase().trim();
+
+  if (isOutOfScopeCommand(command)) {
+    return {
+      in_scope: false,
+      intent: "out_of_scope",
+      confidence: 0.95,
+      reasoning: "topik di luar koperasi",
+      suggested_prompts: FALLBACK_SUGGESTIONS,
+    };
+  }
 
   if (/^(help|bantuan|menu|fitur)$/i.test(lower) || /bantuan|apa yang bisa|bisa bantu|fitur apa/i.test(lower)) {
     return {
@@ -96,7 +112,11 @@ function localClassifyIntent(command: string): IntentResult | null {
     };
   }
 
-  if (/ketua|pengurus|dokumen|profil koperasi|sekretaris|bendahara|nik koperasi|siapa/i.test(lower)) {
+  if (
+    /ketua|pengurus|dokumen|profil koperasi|sekretaris|bendahara|nik koperasi|siapa\s+(?:ketua|pengurus|bendahara|sekretaris|koperasi)/i.test(
+      lower,
+    )
+  ) {
     return {
       in_scope: true,
       intent: "profil_info",
@@ -179,6 +199,16 @@ export async function classifyIntent(
 ): Promise<IntentResult> {
   if (context?.pending_barang_masuk && (isBarangMasukConfirm(command) || parseHargaBeli(command) !== undefined)) {
     return { in_scope: true, intent: "barang_masuk", confidence: 0.95, reasoning: "konfirmasi draft", suggested_prompts: [] };
+  }
+
+  const localEarly = localClassifyIntent(command);
+  if (
+    localEarly &&
+    (localEarly.intent === "out_of_scope" ||
+      localEarly.intent === "upload_nota" ||
+      localEarly.intent === "tambah_produk")
+  ) {
+    return localEarly;
   }
 
   const structural = structuralIntent(command);

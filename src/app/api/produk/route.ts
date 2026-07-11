@@ -66,6 +66,10 @@ export async function POST(req: NextRequest) {
       unit,
       jumlah_masuk: jumlahMasuk,
       harga_beli: hargaBeli,
+      kategori: (body.kategori as string)?.trim() || undefined,
+      jenis_barang: (body.jenis_barang as string)?.trim() || undefined,
+      potensi_desa: (body.potensi_desa as string)?.trim() || undefined,
+      penyedia: (body.penyedia as string)?.trim() || undefined,
     });
 
     await logAudit({

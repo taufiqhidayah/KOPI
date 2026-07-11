@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { SimkopdesView } from "../types";
 import { NavSidebar } from "./NavSidebar";
 import { TopHeader } from "./TopHeader";
@@ -8,7 +8,7 @@ import { SubTabs } from "./SubTabs";
 import { ProductListView } from "./ProductListView";
 import { BarangMasukListView } from "./BarangMasukListView";
 import { PlaceholderView } from "./PlaceholderView";
-import { CopilotEmbedPanel } from "./CopilotEmbedPanel";
+import { CopilotPanel } from "./CopilotPanel";
 import { CopilotFab } from "./CopilotFab";
 import { MobileNav } from "./MobileNav";
 
@@ -32,16 +32,10 @@ export function SimkopdesApp() {
   const [productRefresh, setProductRefresh] = useState(0);
   const [barangMasukRefresh, setBarangMasukRefresh] = useState(0);
 
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      if (event.data?.type === "kopdes-copilot-saved") {
-        setProductRefresh((n) => n + 1);
-        setBarangMasukRefresh((n) => n + 1);
-      }
-    };
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
-  }, []);
+  const refreshLists = () => {
+    setProductRefresh((n) => n + 1);
+    setBarangMasukRefresh((n) => n + 1);
+  };
 
   const showPenjualan = activeNav === "penjualan";
 
@@ -118,22 +112,29 @@ export function SimkopdesApp() {
               <SubTabs activeTab={activeTab} onTabChange={setActiveTab} />
             )}
 
-            <div className="flex min-h-0 flex-1">
-              <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto rounded-b-3xl bg-white p-6 lg:mt-2">
-                {renderMainView()}
-              </main>
-
-              <CopilotEmbedPanel
-                open={copilotOpen}
-                initialView={copilotView}
-                initialPrompt={copilotPrompt}
-              />
-            </div>
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto rounded-b-3xl bg-white p-6 lg:mt-2">
+              {renderMainView()}
+            </main>
           </div>
         </div>
       </div>
 
-      <CopilotFab open={copilotOpen} onClick={() => setCopilotOpen((v) => !v)} />
+      <CopilotFab
+        open={copilotOpen}
+        onClick={() =>
+          copilotOpen
+            ? setCopilotOpen(false)
+            : openCopilot(setCopilotOpen, setCopilotView, setCopilotPrompt)
+        }
+      />
+
+      <CopilotPanel
+        open={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        initialView={copilotView}
+        initialPrompt={copilotPrompt}
+        onBarangMasukSaved={refreshLists}
+      />
     </div>
   );
 }

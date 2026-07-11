@@ -5,6 +5,14 @@ import { getKoperasiRef, query, withTransaction } from "@/lib/db";
 import { generateRef } from "@/lib/security";
 import { saveBarangMasukDokumentasi } from "@/lib/uploads";
 import { buildKeteranganWithDokumentasi, DOKUMENTASI_MAX_BYTES, DOKUMENTASI_MIME, listBarangMasuk } from "@/lib/barang-masuk";
+import { normalizeUnit, sanitizeProdukName } from "@/lib/tambah-produk-guide";
+import {
+  encodeProdukMetaKeterangan,
+  parseProdukMetaFromText,
+  resolveProdukMeta,
+} from "@/lib/produk-meta";
+import { resolveUnmatchedNotaItems, type NotaUnmatchedDraft } from "@/lib/nota-save";
+import { isNotaUnmatchedComplete } from "@/lib/nota-queue";
 
 type BarangMasukItem = {
   produk_sample_id: string;
@@ -14,6 +22,7 @@ type BarangMasukItem = {
   nama_tampilan?: string;
   harga_jual?: number;
   keterangan?: string;
+  unit?: string;
 };
 
 type BarangMasukPayload = {
@@ -21,6 +30,7 @@ type BarangMasukPayload = {
   tanggal_masuk?: string;
   keterangan?: string;
   items: BarangMasukItem[];
+  unmatched_items?: NotaUnmatchedDraft[];
   confirmed_by?: string;
   dokumentasi_nama?: string;
   dokumentasi_url?: string;
@@ -85,6 +95,7 @@ async function parseRequest(req: NextRequest): Promise<{
       keterangan: body.keterangan ?? "",
       confirmed_by: body.confirmed_by ?? "bendahara",
       items: body.items ?? [],
+      unmatched_items: body.unmatched_items,
       dokumentasi_nama: body.dokumentasi_nama,
       dokumentasi_url: body.dokumentasi_url,
     },
@@ -114,10 +125,31 @@ async function insertBarangMasuk(
 
     const namaProduk = item.nama_produk ?? product.rows[0]?.nama_produk ?? "Produk";
     const namaTampilan = item.nama_tampilan?.trim() || namaProduk;
+    const parsedMeta = parseProdukMetaFromText(item.keterangan?.trim() || params.transactionKeterangan);
+    const meta = resolveProdukMeta(namaProduk, item.unit, parsedMeta);
+    const userNotes = item.keterangan?.trim() || params.transactionKeterangan;
     const itemKeterangan = buildKeteranganWithDokumentasi(
-      item.keterangan?.trim() || params.transactionKeterangan,
+      encodeProdukMetaKeterangan(meta, userNotes.replace(/@@PRODUK_META@@[^|]+/g, "").trim()),
       params.dokumentasi,
     );
+
+    if (/^tambah\s+produk/i.test(namaProduk)) {
+      const fixedName = sanitizeProdukName(namaTampilan !== namaProduk ? namaTampilan : namaProduk);
+      await client.query(
+        `UPDATE produk_koperasi SET nama_produk = $1, diperbarui_pada = NOW()
+         WHERE produk_sample_id = $2 AND koperasi_ref = $3`,
+        [fixedName, item.produk_sample_id, params.koperasiRef],
+      );
+    }
+
+    if (item.unit?.trim()) {
+      const unit = normalizeUnit(item.unit);
+      await client.query(
+        `UPDATE produk_koperasi SET unit = $1, diperbarui_pada = NOW()
+         WHERE produk_sample_id = $2 AND koperasi_ref = $3`,
+        [unit, item.produk_sample_id, params.koperasiRef],
+      );
+    }
 
     await client.query(
       `INSERT INTO barang_masuk_produk
@@ -216,10 +248,30 @@ export async function POST(req: NextRequest) {
     const koperasiRef = payload.koperasi_ref || getKoperasiRef();
     const tanggalMasuk = payload.tanggal_masuk ?? new Date().toISOString();
     const keterangan = payload.keterangan ?? "";
-    const items = payload.items;
     const confirmedBy = payload.confirmed_by ?? "bendahara";
 
-    if (!items?.length) {
+    if (payload.unmatched_items?.length) {
+      const incomplete = payload.unmatched_items.find((item) => !isNotaUnmatchedComplete(item));
+      if (incomplete) {
+        return NextResponse.json(
+          { success: false, error: `Data produk "${incomplete.nama}" belum lengkap. Lengkapi satuan, kategori, jenis, potensi, dan penyedia.` },
+          { status: 400 },
+        );
+      }
+    }
+
+    let items = [...(payload.items ?? [])];
+    let productsCreated: string[] = [];
+
+    if (payload.unmatched_items?.length) {
+      const resolved = await resolveUnmatchedNotaItems(payload.unmatched_items, {
+        koperasiRef,
+      });
+      items = [...items, ...resolved.items];
+      productsCreated = resolved.products_created;
+    }
+
+    if (!items.length) {
       return NextResponse.json({ success: false, error: "Items tidak boleh kosong" }, { status: 400 });
     }
 
@@ -268,11 +320,16 @@ export async function POST(req: NextRequest) {
       executionTimeMs: Date.now() - start,
     });
 
+    const autoCreateNote = productsCreated.length
+      ? ` Produk baru: ${productsCreated.join(", ")}.`
+      : "";
+
     return NextResponse.json({
       success: true,
       records_created: recordsCreated,
       inventaris_updated: true,
-      message: `✅ Data tersimpan. Stok ${stockMessages.join(", ")}`,
+      products_created: productsCreated,
+      message: `✅ Data tersimpan. Stok ${stockMessages.join(", ")}.${autoCreateNote}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

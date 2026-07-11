@@ -33,3 +33,42 @@ export function buildKeteranganWithDokumentasi(
   const combined = base ? `${prefix}. ${base}` : prefix;
   return combined.slice(0, 1000);
 }
+
+export function stripDokumentasiFromKeterangan(keterangan: string | null | undefined): string {
+  if (!keterangan) return "";
+  return keterangan
+    .replace(/Lampiran:\s*\/uploads\/barang-masuk\/\S+(?:\s*\([^)]+\))?\s*\.?\s*/gi, "")
+    .trim();
+}
+
+export function extractPenyediaLabel(keterangan: string | null | undefined): string {
+  const cleaned = stripDokumentasiFromKeterangan(keterangan);
+  if (!cleaned) return "";
+
+  const metaMatch = cleaned.match(/@@PRODUK_META@@(\{[^}]+\})/);
+  if (metaMatch) {
+    try {
+      const meta = JSON.parse(metaMatch[1]) as { penyedia?: string };
+      if (meta.penyedia?.trim()) return meta.penyedia.trim().slice(0, 100);
+    } catch {
+      // fall through
+    }
+  }
+
+  const penyediaMatch = cleaned.match(/(?:penyedia|pemasok|supplier)\s*[:\-]?\s*([^|]+)/i);
+  if (penyediaMatch) return penyediaMatch[1].trim().slice(0, 100);
+
+  const dariMatch = cleaned.match(/(?:^|\|)\s*Dari\s+(.+)/i);
+  if (dariMatch) return dariMatch[1].trim().slice(0, 100);
+
+  if (
+    /harga\s*(beli|jual)/i.test(cleaned)
+    || /^(an|beras|tambah|produk)\b/i.test(cleaned)
+    || /^\d+\s*(kg|kilo|liter)/i.test(cleaned)
+    || /^@@PRODUK_META@@/.test(cleaned)
+  ) {
+    return "";
+  }
+
+  return cleaned.slice(0, 100);
+}

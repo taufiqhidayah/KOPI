@@ -1,14 +1,20 @@
 "use client";
 
 import { useState } from "react";
+import type { CrudConfirmView } from "@/lib/crud-confirm";
+import type { ReportView } from "@/lib/report-format";
+import { CrudConfirmCard } from "./CrudConfirmCard";
+import { ReportPreview } from "./ReportPreview";
 
 export type BotMessagePayload = {
   content: string;
   intent?: string;
   in_scope?: boolean;
   data?: Record<string, unknown>[];
+  report?: ReportView;
   suggested_prompts?: string[];
   draft_surat?: string;
+  crud_confirm?: CrudConfirmView;
 };
 
 function formatValue(val: unknown): string {
@@ -71,9 +77,24 @@ type ChatMessageProps = {
   payload: BotMessagePayload | string;
   onSuggestionClick?: (text: string) => void;
   showSuggestions?: boolean;
+  showCrudConfirm?: boolean;
+  onCrudConfirm?: () => void;
+  onCrudEdit?: () => void;
+  onCrudCancel?: () => void;
+  crudConfirmLoading?: boolean;
 };
 
-export function ChatMessage({ role, payload, onSuggestionClick, showSuggestions }: ChatMessageProps) {
+export function ChatMessage({
+  role,
+  payload,
+  onSuggestionClick,
+  showSuggestions,
+  showCrudConfirm,
+  onCrudConfirm,
+  onCrudEdit,
+  onCrudCancel,
+  crudConfirmLoading,
+}: ChatMessageProps) {
   const isUser = role === "user";
   const bot = typeof payload === "string" ? { content: payload } : payload;
 
@@ -91,7 +112,19 @@ export function ChatMessage({ role, payload, onSuggestionClick, showSuggestions 
           {!isUser && bot.draft_surat && <DraftPreview text={bot.draft_surat} />}
         </div>
 
-        {!isUser && bot.data && bot.data.length > 0 && <DataPreview data={bot.data} />}
+        {!isUser && bot.report && <ReportPreview report={bot.report} />}
+
+        {!isUser && !bot.report && bot.data && bot.data.length > 0 && <DataPreview data={bot.data} />}
+
+        {!isUser && showCrudConfirm && bot.crud_confirm && onCrudConfirm && (
+          <CrudConfirmCard
+            confirm={bot.crud_confirm}
+            onConfirm={onCrudConfirm}
+            onEdit={onCrudEdit}
+            onCancel={onCrudCancel}
+            loading={crudConfirmLoading}
+          />
+        )}
 
         {!isUser && showSuggestions && bot.suggested_prompts?.length && onSuggestionClick && (
           <div className="flex flex-wrap gap-1.5">

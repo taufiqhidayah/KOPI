@@ -1,3 +1,5 @@
+import { extractProdukName } from "./tambah-produk-guide";
+
 export type ParsedBarangMasuk = {
   qty: number;
   unit?: string;
@@ -10,7 +12,7 @@ const PRODUCT_HINTS =
 
 const ACTION_HINTS = /masuk|tambah|catat|beli|terima|input|simpan|stock|stok/i;
 
-const UNIT_PATTERN = /(\d+(?:[.,]\d+)?)\s*(kilo|kg|kilogram|karung|galon|liter|buah|pcs|pack|dus)?/i;
+const UNIT_PATTERN = /\b(\d+(?:[.,]\d+)?)\s*(kilo|kg|kilogram|karung|galon|liter|buah|pcs|pack|dus)\b/i;
 
 export function parseHargaBeli(text: string): number | undefined {
   const lower = text.toLowerCase();
@@ -21,7 +23,7 @@ export function parseHargaBeli(text: string): number | undefined {
   if (hargaOnly && !/harga\s*jual/i.test(lower)) return parseRupiah(hargaOnly[1]);
 
   const bare = lower.match(/\b(\d{4,})\b/);
-  if (bare && !UNIT_PATTERN.test(lower.replace(bare[0], "")) && !/harga\s*jual/i.test(lower)) {
+  if (bare && !UNIT_PATTERN.test(lower) && !/harga\s*jual/i.test(lower)) {
     return parseRupiah(bare[1]);
   }
 
@@ -98,6 +100,8 @@ function normalizeText(text: string): string {
 
 export function parseBarangMasukText(text: string): ParsedBarangMasuk | null {
   const lower = normalizeText(text);
+  if (/^tambah\s+produk\b/i.test(lower)) return null;
+
   const qtyMatch = lower.match(UNIT_PATTERN);
   if (!qtyMatch) return null;
 
@@ -110,15 +114,17 @@ export function parseBarangMasukText(text: string): ParsedBarangMasuk | null {
 
   const hargaBeli = parseHargaBeli(text);
 
-  const productQuery = lower
-    .replace(UNIT_PATTERN, " ")
-    .replace(/(?:harga|beli|@|rp\.?)\s*[\d.,]+/gi, " ")
-    .replace(
-      /\b(masuk|tambah|catat|beli|terima|input|simpan|tolong|bantu|dong|ya|saya|mau|ada|barang|barangku|stok)\b/g,
-      " ",
-    )
-    .replace(/\s+/g, " ")
-    .trim();
+  const productQuery = extractProdukName(
+    lower
+      .replace(UNIT_PATTERN, " ")
+      .replace(/(?:harga\s*beli|harga|beli|@|rp\.?)\s*[\d.,]+/gi, " ")
+      .replace(
+        /\b(masuk|tambah|catat|beli|terima|input|simpan|tolong|bantu|dong|ya|saya|mau|ada|barang|barangku|stok|produk|baru|harga)\b/g,
+        " ",
+      )
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
 
   if (productQuery.length < 2) return null;
 
@@ -136,19 +142,40 @@ export function parseProductOnly(text: string): { productQuery: string } | null 
   const lower = normalizeText(text).trim();
   if (lower.length < 3) return null;
 
-  if (/^(help|bantuan|stok|laporan|penjualan|berapa|cek|lihat|tampilkan|buatkan|siapa|buka|bank|rekening)/i.test(lower)) {
+  if (/^(help|bantuan|stok|laporan|penjualan|berapa|cek|lihat|tampilkan|buatkan|siapa|buka|bank|rekening|upload|nota|foto|struk)/i.test(lower)) {
+    return null;
+  }
+
+  if (/upload|nota|foto nota|struk/i.test(lower)) {
     return null;
   }
 
   if (PRODUCT_HINTS.test(lower)) {
-    return { productQuery: lower };
+    return { productQuery: extractProdukName(lower) };
   }
 
   if (/^[a-z\s]{3,40}$/i.test(lower) && !/^(ya|ok|batal|iya)$/i.test(lower)) {
-    return { productQuery: lower };
+    return { productQuery: extractProdukName(lower) };
   }
 
   return null;
+}
+
+export function parseTambahProdukQty(text: string): Pick<ParsedBarangMasuk, "qty" | "unit" | "hargaBeli"> | null {
+  const body = text.replace(/^tambah\s+produk\s*/i, "").trim();
+  const hargaBeli = parseHargaBeli(text);
+  const parsed = parseBarangMasukText(body);
+  if (parsed) {
+    return { qty: parsed.qty, unit: parsed.unit, hargaBeli: parsed.hargaBeli ?? hargaBeli };
+  }
+
+  const qtyMatch = body.match(UNIT_PATTERN);
+  if (!qtyMatch) return null;
+
+  const qty = parseFloat(qtyMatch[1].replace(",", "."));
+  if (!qty || qty <= 0) return null;
+
+  return { qty, unit: qtyMatch[2], hargaBeli };
 }
 
 export function isBarangMasukConfirm(text: string): boolean {
